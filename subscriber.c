@@ -1,4 +1,4 @@
-// MQTT Multi-Topic Subscriber - EXTREME SPEED TUNED
+// MQTT Multi-Topic Subscriber - FINAL ULTIMATE EDITION (No-Ternary-Fix)
 // TQ1: Status | TQ2: Daten | I13: Enable | I1: Start Trigger
 
 #define BROKER_IP "x.x.x.x"
@@ -14,9 +14,14 @@ int topicQos[MAX_TOPICS];
 char values[512]; 
 char buf[1024];
 char rcvTop[128];
-char fOut[600];
-char outBuf[800]; 
+char fOut[1024];      
+char outBuf[2048];    
 char response[4];   
+
+// --- CACHE FÜR TOPIC-ERKENNUNG ---
+int tLenCache[MAX_TOPICS];
+int tIsWild[MAX_TOPICS];
+int isMatch;
 
 // --- GLOBALE VARIABLEN FÜR MAXIMALE PERFORMANCE ---
 int i, k, n, t, c, initialized = 0; 
@@ -29,12 +34,9 @@ int bIdx, type, qosFlag, msgPos, remLen, mult, totalLen, tLen, pStart, pLen;
 int copyLen, outPos, fLen, rid; 
 
 // Variablen für Connect & Subscribe
-int uL, pL, cL, rL, tL; // <--- HIER: tL hinzugefügt
+int uL, pL, cL, rL, tL;
 char h[12]; char head[2];
 char subH[6]; char qos;
-
-// Variablen für match_topic
-int sL;
 
 // Variablen für Main-Loop
 float enable;
@@ -44,7 +46,6 @@ char* tInput;
 int pQos;
 char url[64];
 char p[2];
-// --------------------------------------------------
 
 // --- HILFSFUNKTIONEN ---
 
@@ -68,17 +69,6 @@ void safe_mqtt_subscribe(STREAM* s, char* topic, int qosLvl) {
     subH[4]=(tL>>8)&0xFF; subH[5]=tL&0xFF;
     stream_write(s, subH, 6); stream_write(s, topic, tL); stream_write(s, &qos, 1);
     stream_flush(s);
-}
-
-int match_topic(char* rTop, char* search) {
-    sL = strlen(search); 
-    if (sL <= 0) return 0;
-    if (search[sL - 1] == '#') {
-        if (strncmp(rTop, search, sL - 1) == 0) return 1;
-    } else {
-        if (strcmp(rTop, search) == 0) return 1;
-    }
-    return 0;
 }
 
 // --- HAUPTSCHLEIFE ---
@@ -109,24 +99,27 @@ while(1) {
                 }
                 if (c > 0) { topicCount = t + 1; } else { topicCount = t; }
             }
+            
+            for (i = 0; i < topicCount; i++) {
+                tLenCache[i] = strlen(&topics[i * 128]);
+                tIsWild[i] = 0;
+                if (tLenCache[i] > 0) {
+                   if (topics[i * 128 + tLenCache[i] - 1] == '#') tIsWild[i] = 1;
+                }
+            }
+            
             initialized = 1; 
             setoutputtext(0, "Ready - Waiting for Trigger");
         }
 
         if ((startTrg > 0.5) && (lastStartTrigger <= 0.5) && (pMqttStream == NULL)) {
-            setoutputtext(0, "Connecting...");
             sprintf(url, "/dev/tcp/%s/%d", BROKER_IP, BROKER_PORT);
             pMqttStream = stream_create(url, 0, 0);
             if (pMqttStream != NULL) {
                 safe_mqtt_connect(pMqttStream);
-                setoutputtext(0, "Connected");
                 lastPing = now;
-                for(i=0; i < topicCount; i++) { 
-                    safe_mqtt_subscribe(pMqttStream, &topics[i * 128], topicQos[i]); 
-                }
+                for(i=0; i < topicCount; i++) safe_mqtt_subscribe(pMqttStream, &topics[i * 128], topicQos[i]); 
                 setoutputtext(0, "Subscribed");
-            } else { 
-                setoutputtext(0, "TCP Error");
             }
         }
         lastStartTrigger = startTrg;
@@ -137,10 +130,7 @@ while(1) {
 
             if ((now - lastPing) > 30) {
                 p[0]=0xC0; p[1]=0x00; 
-                if (stream_write(pMqttStream, p, 2) <= 0) {
-                    setoutputtext(0, "Ping Failed");
-                }
-                stream_flush(pMqttStream);
+                stream_write(pMqttStream, p, 2); stream_flush(pMqttStream);
                 lastPing = now;
             }
 
@@ -152,43 +142,48 @@ while(1) {
                     type = buf[bIdx] & 0xF0;
                     qosFlag = (buf[bIdx] >> 1) & 0x03;
                     msgPos = bIdx + 1; remLen = 0; mult = 1;
-                    
                     while (msgPos < n) {
                         remLen = remLen + ((buf[msgPos] & 127) * mult);
                         if ((buf[msgPos] & 128) == 0) { msgPos++; break; }
                         mult = mult * 128; msgPos++;
                     }
                     totalLen = (msgPos - bIdx) + remLen;
-
                     if ((type == 0x30) && ((bIdx + totalLen) <= n)) {
                         tLen = (buf[msgPos] << 8) | (buf[msgPos+1] & 0xFF);
                         pStart = msgPos + 2 + tLen;
-                        
                         if (qosFlag > 0) {
-                            rid = (buf[pStart] << 8) | (buf[pStart+1] & 0xFF);
-                            if (qosFlag == 1) { 
-                                response[0] = 0x40; response[1] = 0x02; 
-                                response[2] = buf[pStart]; response[3] = buf[pStart+1];
-                                stream_write(pMqttStream, response, 4); stream_flush(pMqttStream);
-                            } else if (qosFlag == 2) { 
-                                response[0] = 0x50; response[1] = 0x02; 
-                                response[2] = buf[pStart]; response[3] = buf[pStart+1];
-                                stream_write(pMqttStream, response, 4); stream_flush(pMqttStream);
-                            }
+                            if (qosFlag == 1) { response[0] = 0x40; response[1] = 0x02; response[2] = buf[pStart]; response[3] = buf[pStart+1]; stream_write(pMqttStream, response, 4); stream_flush(pMqttStream); }
+                            else if (qosFlag == 2) { response[0] = 0x50; response[1] = 0x02; response[2] = buf[pStart]; response[3] = buf[pStart+1]; stream_write(pMqttStream, response, 4); stream_flush(pMqttStream); }
                             pStart = pStart + 2; 
                         }
                         
                         pLen = (bIdx + totalLen) - pStart;
-                        if (tLen > 127) tLen = 127;
-                        strncpy(rcvTop, &buf[msgPos+2], tLen); rcvTop[tLen] = '\0';
+                        
+                        // Fix 1: rcvTop Length
+                        tL = tLen; 
+                        if (tL > 127) tL = 127;
+                        strncpy(rcvTop, &buf[msgPos+2], tL); 
+                        rcvTop[tL] = '\0';
 
                         for(k=0; k < topicCount; k++) {
-                            if(match_topic(rcvTop, &topics[k * 128])) {
-                                if (pLen > 510) { copyLen = 510; } else { copyLen = pLen; }
-                                strncpy(values, &buf[pStart], copyLen); values[copyLen] = '\0';
+                            isMatch = 0;
+                            if (tIsWild[k]) { 
+                                if (strncmp(rcvTop, &topics[k * 128], tLenCache[k] - 1) == 0) isMatch = 1; 
+                            }
+                            else { 
+                                if (strcmp(rcvTop, &topics[k * 128]) == 0) isMatch = 1; 
+                            }
+                            
+                            if(isMatch) {
+                                // Fix 2: copyLen
+                                copyLen = pLen; 
+                                if (copyLen > 510) copyLen = 510;
+                                
+                                strncpy(values, &buf[pStart], copyLen); 
+                                values[copyLen] = '\0';
                                 sprintf(fOut, "S%d:[%s|%s];", k + 1, rcvTop, values);
                                 fLen = strlen(fOut);
-                                if ((outPos + fLen) < 790) { strcpy(&outBuf[outPos], fOut); outPos = outPos + fLen; }
+                                if ((outPos + fLen) < 2000) { strcpy(&outBuf[outPos], fOut); outPos = outPos + fLen; }
                                 break; 
                             }
                         }
@@ -201,21 +196,13 @@ while(1) {
                     bIdx = bIdx + totalLen;
                 }
             }
-            if (outPos > 0) { setoutputtext(1, outBuf); } 
-            if (n < 0) { 
-                setoutputtext(0, "Connection Lost");
-                stream_close(pMqttStream); pMqttStream = NULL; 
-            }
+            if (outPos > 0) setoutputtext(1, outBuf); 
+            if (n < 0) { setoutputtext(0, "Connection Lost"); stream_close(pMqttStream); pMqttStream = NULL; }
         }
         sleep(10); 
     } else {
         setoutput(0, 0); 
-        if(pMqttStream != NULL) { 
-            setoutputtext(0, "Disconnected");
-            stream_close(pMqttStream); pMqttStream = NULL; 
-        }
-        initialized = 0; 
-        lastStartTrigger = 0.0;
-        sleep(500); 
+        if(pMqttStream != NULL) { setoutputtext(0, "Disconnected"); stream_close(pMqttStream); pMqttStream = NULL; }
+        initialized = 0; lastStartTrigger = 0.0; sleep(500); 
     }
 }
