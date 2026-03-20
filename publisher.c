@@ -1,5 +1,5 @@
-// MQTT Publisher - ZERO-PARSING - WITH DIAGNOSTICS
-// T1=Topic, T2=Payload, I13=Enable, I1=Trigger, I2=QoS, I3=Retain, I13=Enable
+// MQTT Publisher - EXTREME SPEED TUNED & SAFE (v3)
+// T1=Topic, T2=Payload, I13=Enable, I1=Trigger, I2=QoS, I3=Retain
 // AQ1 (Index 0) = Heartbeat | AQ2 (Index 1) = Error Pulse
 // TQ1 (Index 0) = Status & Error Text
 
@@ -16,11 +16,31 @@ int lastHeartbeat = -1;
 float lastTrigger = 0.0;
 char packetBuf[1024];
 
+// --- GLOBALE VARIABLEN FÜR MAXIMALE PERFORMANCE ---
+// Variablen für connect
+int uL, pL, cL, rL;
+char h[12]; char head[2];
+
+// Variablen für ack
+char r[4]; int timeout, rid;
+
+// Variablen für publish
+int tLen, pLen, remLen, curId, j, idx, attempt, success;
+char rel[4];
+
+// Variablen für Hauptschleife
+float ena, trg;
+int qosIn, retIn, curHb;
+char url[64];
+char* tTopic; 
+char* tPayload;
+char p[2];
+char dummy[128];
+// --------------------------------------------------
+
 // --- HILFSFUNKTIONEN ---
 
 void safe_mqtt_connect(STREAM* s) {
-    int uL, pL, cL, rL;
-    char h[12]; char head[2];
     uL = strlen(MQTT_USER); pL = strlen(MQTT_PASS); cL = strlen(CLIENT_ID);
     rL = 10 + 2 + cL + 2 + uL + 2 + pL;
     h[0]=0x10; h[1]=rL; h[2]=0x00; h[3]=0x04; h[4]='M'; h[5]='Q'; h[6]='T'; h[7]='T';
@@ -33,7 +53,7 @@ void safe_mqtt_connect(STREAM* s) {
 }
 
 int wait_for_ack(STREAM* s, int expectedType, int expectedId) {
-    char r[4]; int timeout = 0; int rid;
+    timeout = 0; 
     while (timeout < 50) {
         if (stream_read(s, r, 1, 10) > 0) {
             if ((r[0] & 0xF0) == (expectedType & 0xF0)) {
@@ -48,10 +68,21 @@ int wait_for_ack(STREAM* s, int expectedType, int expectedId) {
 }
 
 void safe_mqtt_publish(STREAM* s, char* topic, char* payload, int qos, int retain) {
-    int tLen, pLen, remLen, curId, j, idx, attempt, success;
     tLen = strlen(topic); 
     if (tLen == 0) { setoutputtext(0, "Error: Topic missing"); return; }
     
+    // --- SICHERHEITS-FILTER GEGEN MALFORMED PACKETS ---
+    if (qos > 2 || qos < 0) qos = 0; 
+    if (retain != 1) retain = 0;
+    
+    for(j=0; j<tLen; j++) {
+        if (topic[j] == '#' || topic[j] == '+') {
+            setoutputtext(0, "Error: Wildcard in Topic!");
+            return; 
+        }
+    }
+    // --------------------------------------------------
+
     pLen = strlen(payload);
     remLen = 2 + tLen + pLen;
     curId = 0;
@@ -85,7 +116,7 @@ void safe_mqtt_publish(STREAM* s, char* topic, char* payload, int qos, int retai
         else if (qos == 1) { success = wait_for_ack(s, 0x40, curId); }
         else if (qos == 2) { 
             if (wait_for_ack(s, 0x50, curId)) { 
-                char rel[4]; rel[0] = 0x62; rel[1] = 0x02; rel[2] = (curId >> 8) & 0xFF; rel[3] = curId & 0xFF;
+                rel[0] = 0x62; rel[1] = 0x02; rel[2] = (curId >> 8) & 0xFF; rel[3] = curId & 0xFF;
                 stream_write(s, rel, 4); stream_flush(s);
                 if (wait_for_ack(s, 0x70, curId)) success = 1; 
             }
@@ -104,14 +135,14 @@ void safe_mqtt_publish(STREAM* s, char* topic, char* payload, int qos, int retai
 // --- HAUPTSCHLEIFE ---
 
 while(1) {
-    float ena = getinput(12); 
-    float trg = getinput(0);
-    int qosIn = (int)(getinput(1) + 0.1); 
-    int retIn = (int)(getinput(2) + 0.1);
+    ena = getinput(12); 
+    trg = getinput(0);
+    qosIn = (int)(getinput(1) + 0.1); 
+    retIn = (int)(getinput(2) + 0.1);
     
     if (ena > 0.5) {
         if (pMqttStream == NULL) {
-            char url[64]; sprintf(url, "/dev/tcp/%s/%d", BROKER_IP, BROKER_PORT);
+            sprintf(url, "/dev/tcp/%s/%d", BROKER_IP, BROKER_PORT);
             pMqttStream = stream_create(url, 0, 0);
             if (pMqttStream != NULL) { 
                 safe_mqtt_connect(pMqttStream); 
@@ -124,12 +155,12 @@ while(1) {
         }
         
         if (pMqttStream != NULL) {
-            int curHb = (getcurrenttime() / 5) % 2;
+            curHb = (getcurrenttime() / 5) % 2;
             if (curHb != lastHeartbeat) { setoutput(0, curHb); lastHeartbeat = curHb; }
             
             if (trg > 0.5 && lastTrigger <= 0.5) {
-                char* tTopic = getinputtext(0); 
-                char* tPayload = getinputtext(1);
+                tTopic = getinputtext(0); 
+                tPayload = getinputtext(1);
                 if (tTopic != NULL && tPayload != NULL) {
                     safe_mqtt_publish(pMqttStream, tTopic, tPayload, qosIn, retIn);
                 }
@@ -137,7 +168,7 @@ while(1) {
             lastTrigger = trg;
 
             if (getcurrenttime() - lastPing > 30) {
-                char p[2]; p[0]=0xC0; p[1]=0x00; 
+                p[0]=0xC0; p[1]=0x00; 
                 if (stream_write(pMqttStream, p, 2) <= 0) {
                     setoutputtext(0, "Connection Lost");
                     stream_close(pMqttStream); pMqttStream = NULL;
@@ -146,7 +177,7 @@ while(1) {
                     lastPing = getcurrenttime();
                 }
             }
-            char dummy[128]; while (stream_read(pMqttStream, dummy, 128, 1) > 0);
+            while (stream_read(pMqttStream, dummy, 128, 1) > 0);
         }
     } else if (pMqttStream != NULL) {
         setoutputtext(0, "Disconnected (Enable Off)");
